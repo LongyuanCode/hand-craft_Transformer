@@ -49,6 +49,7 @@ def create_data(source_sents, target_sents):
 
     # Index
     x_list, y_list, Sources, Targets = [], [], [], []
+    cn_valid_lens, en_valid_lens = [], []
     for source_sent, target_sent in zip(source_sents, target_sents):
         x = [
             cn2idx.get(word, 1)
@@ -63,6 +64,8 @@ def create_data(source_sents, target_sents):
             y_list.append(np.array(y))
             Sources.append(source_sent)
             Targets.append(target_sent)
+            cn_valid_lens.append(len(x))
+            en_valid_lens.append(len(y))
 
     # Pad
     X = np.zeros([len(x_list), maxlen], np.int32)
@@ -75,7 +78,7 @@ def create_data(source_sents, target_sents):
                           'constant',
                           constant_values=(0, 0))
 
-    return X, Y, Sources, Targets
+    return X, Y, Sources, Targets, cn_valid_lens, en_valid_lens
 
 
 def load_data(data_type):
@@ -95,8 +98,8 @@ def load_data(data_type):
         if line and line[0] != '<'
     ]
 
-    X, Y, Sources, Targets = create_data(cn_sents, en_sents)
-    return X, Y, Sources, Targets
+    X, Y, Sources, Targets, cn_valid_lens, en_valid_lens = create_data(cn_sents, en_sents)
+    return X, Y, Sources, Targets, cn_valid_lens, en_valid_lens
 
 
 def load_train_data():
