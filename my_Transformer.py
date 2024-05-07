@@ -25,8 +25,8 @@ class PositionalEncoding(nn.Module):
         self.posi_enc[:, :, 0::2] = torch.sin(tmp3)     # 能用pytorch中矩阵操作完成的，就不要自己写for循环
         self.posi_enc[:, :, 1::2] = torch.cos(tmp3)
     def forward(self, X):   # 注意！这里的X的形状和上面说的(n,d)不太一样，这里多了一个batch维度。
-        X2 = X + self.posi_enc[:, :X.shape[1], :].to(X.device)
-        return self.dropout(X2)  # dropout防止过拟合
+        X = X + self.posi_enc[:, :X.shape[1], :].to(X.device)
+        return self.dropout(X)  # dropout防止过拟合
     
 class PositionwiseFFN(nn.Module):
     def __init__(self, input_h_size, ffn_h_size, ffn_output_size):
@@ -111,15 +111,30 @@ class MultiHeadAttention(nn.Module):
             output = self.attention(q, k, v, v_l)  # output.shape = (batch_size * num_heads, q的数目, p_o/h)
             output_concat_heads = self.reshape_attention_output(output)
             return self.W_o(output_concat_heads)
-            
+
+class LayerNorm_man(nn.Module):
+    def __init__(self, num_hiddens, eps=1e-12):
+        super(LayerNorm_man, self).__init__()
+        self.gamma = nn.Parameter(torch.ones(num_hiddens))
+        self.beta = nn.Parameter(torch.zeros(num_hiddens))
+        self.eps = eps
+    
+    def forward(self, X):
+        mean = X.mean(-1, keepdim=True)
+        var = X.var(-1, unbiased=False, keepdim=True)   # 在最后一个维度，也就是num_hiddens上计算
+        out = (X - mean) / torch.sqrt(var + self.eps)
+        out = self.gamma * out + self.beta      # why?
+
+        return out          
 class AddNorm(nn.Module):
     def __init__(self, embedding_dim, dropout):
         super(AddNorm, self).__init__()
         self.dropout = nn.Dropout(dropout)
-        self.layer_norm = nn.LayerNorm(embedding_dim)
+        self.layer_norm = LayerNorm_man(embedding_dim)
 
     def forward(self, X, Y):
-        return self.layer_norm(self.dropout(Y) + X)
+        output = self.layer_norm(self.dropout(Y) + X)
+        return output
     
 class TransformerEncoderBlock(nn.Module):
     def __init__(self, num_heads, num_hiddens, dropout, ffn_h_size, bias=False):
@@ -150,12 +165,12 @@ class TransformerEncoder(nn.Module):
                                                          dropout, ffn_h_size, bias))
             
     def forward(self, X, valid_lens):
-        X2 = self.position_ecd(self.embedding(X) * math.sqrt(self.num_hiddens))
+        X = self.position_ecd(self.embedding(X) * math.sqrt(self.num_hiddens))
         self.attention_weights = []
         for i, blk in enumerate(self.blks):
-            X3 = blk(X2, valid_lens)
+            X = blk(X, valid_lens)
             self.attention_weights.append(blk.attention.attention.attention_weights)
-        return X3
+        return X
 
 class TransformerDecoderBlock(nn.Module):
     def __init__(self, num_heads, num_hiddens,
@@ -172,18 +187,10 @@ class TransformerDecoderBlock(nn.Module):
         self.positionwise_ffn = PositionwiseFFN(num_hiddens, ffn_h_size, num_hiddens)
         self.add_norm3 = AddNorm(num_hiddens, dropout)
     
-    def forward(self, X, context_time_step, enc_output, enc_valid_len):
+    def forward(self, X, enc_output, enc_valid_len):
         """
-        X.shape: [batch_size, seq_len_after_padding, embedding_size]
+        X.shape: [batch_size, seq_len_after_padding = max_seq_len, embedding_size]
         """
-        if context_time_step[self.i] is None:
-            keys = X
-            values = X
-        else:
-            keys = torch.cat((context_time_step[self.i], X), dim=1)
-            values = torch.cat((context_time_step[self.i], X), dim=1)
-        context_time_step[self.i] = keys    # or context_time_step = values
-
         if self.training:
             batch_size = X.shape[0]
             seq_len_after_padding = X.shape[1]
@@ -191,17 +198,28 @@ class TransformerDecoderBlock(nn.Module):
                                          device=X.device).repeat(batch_size, 1)
         else:
             dec_valid_len = None
-        
-        X2 = self.attention1(X, keys, values, dec_valid_len)
-        output_of_add_norm1 = self.add_norm1(X, X2)
-        output_of_attention2 = self.attention2(output_of_add_norm1, 
-                                               enc_output, enc_output, enc_valid_len)
-        output_of_add_norm2 = self.add_norm2(output_of_add_norm1,
-                                             output_of_attention2)
-        output_of_ffn = self.positionwise_ffn(output_of_add_norm2)
-        output = self.add_norm3(output_of_add_norm2, output_of_ffn)
 
-        return output, context_time_step
+        # 1. compute self attention
+        decoder_layer_input = X
+        self_atten = self.attention1(quaries=X, keys=X, values=X, valid_lens=dec_valid_len)
+
+        # 2. first add and norm
+        output_add_norm1 = self.add_norm1(decoder_layer_input, self_atten)
+
+        if enc_output is not None:
+            # 3. compute encoder-decoder attention
+            e_d_atten = self.attention2(quaries=output_add_norm1, keys=enc_output,
+                                        values=enc_output, valid_lens=enc_valid_len)
+            # 4. second add and norm
+            output_add_norm2 = self.add_norm2(output_add_norm1, e_d_atten)
+        
+        # 5. positionwise feed forward network
+        output_pos_ffn = self.positionwise_ffn(output_add_norm2)
+
+        # 6. third add and norm
+        output_add_norm3 = self.add_norm3(output_add_norm2, output_pos_ffn)
+
+        return output_add_norm3
     
 class TransformerDecoder(nn.Module):
     def __init__(self, num_heads, num_hiddens,
@@ -222,12 +240,12 @@ class TransformerDecoder(nn.Module):
                                                          dropout=dropout,
                                                          i=i))
 
-    def forward(self, X, context_time_step, enc_output, enc_vilid_len):
-        X2 = self.pos_encoding(self.embedding(X) * math.sqrt(self.num_hiddens))
+    def forward(self, X, enc_output, enc_valid_len):
+        X = self.pos_encoding(self.embedding(X) * math.sqrt(self.num_hiddens))
         for _, blk in enumerate(self.blks):
-            X3, context_time_step = blk(X2, context_time_step, enc_output, enc_vilid_len)
+            X = blk(X, enc_output, enc_valid_len)
 
-        return X3
+        return X
 
 class MyTransformer(nn.Module):
     def __init__(self, num_heads, num_hiddens, seq_max_len,
@@ -244,7 +262,7 @@ class MyTransformer(nn.Module):
         
     def forward(self, srcX, tarX, enc_valid_len, contex_time_step):
         enc_output = self.encoder(srcX, enc_valid_len)
-        dec_output = self.decoder(tarX, contex_time_step, enc_output, enc_valid_len)
+        dec_output = self.decoder(tarX, enc_output, enc_valid_len)
         output = self.output_layer(dec_output)
 
         return output
@@ -263,11 +281,11 @@ if __name__ == '__main__':
     TRAIN_SET_PROP = 0.8
     MAX_SEQ_LEN = 50
 
-    device = 'cpu'
-    log_path = '/home/users/chuanwei.tang/d2l/my_transformer/log'
+    device = 'cuda'
+    log_path = './log'
     writer = SummaryWriter(log_path)
-    cn2idx, idx2cn = load_cn_vocab()
-    en2idx, idx2en = load_en_vocab()
+    cn2idx, idx2cn = load_cn_vocab()    # len = 12946
+    en2idx, idx2en = load_en_vocab()    # len = 11370
     X_train, Y_train,\
     Source, Target,\
     cn_valid_lens, en_valid_lens = load_data('train') # X:cn, Y:en | [seq_num, emb_size_after_padding]
@@ -291,9 +309,13 @@ if __name__ == '__main__':
     model.train()
     torch.autograd.set_detect_anomaly(True)
     print(">>> Train start.")
+
+    print_version = False
     for epoch_i in range(N_EPOCH):
         print("  >>> epoch {}".format(epoch_i))
+        batch_i = 0
         for data_batch in train_data_loader:
+            batch_i = batch_i + 1
             en_batch, en_valid_lens_batch,\
                 cn_batch, cn_valid_lens_batch = data_batch
             en_batch = en_batch.to(device)
@@ -301,6 +323,7 @@ if __name__ == '__main__':
             cn_batch = cn_batch.to(device)
             cn_valid_lens_batch = cn_valid_lens_batch.to(device)
             batch_size, seq_len_after_padding = cn_batch.shape
+            optimizer.zero_grad()
             cn_hat = model(en_batch, cn_batch,
                            en_valid_lens_batch, contex_time_step)   # [64, 50, 12946]
             
@@ -309,10 +332,22 @@ if __name__ == '__main__':
             
             loss = criterion(cn_hat_trans, cn_batch_trans)
 
-            optimizer.zero_grad()
-            with torch.autograd.detect_anomaly():
-                loss.backward(retain_graph=True)    # 使用retain_graph=True比较消耗显存，尝试优化为X.data参与计算赋值给X
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+        print(f"loss = {loss}")
 
         writer.add_scalar('loss', loss, epoch_i)
+
+"""
+  >>> epoch 55
+loss = 2.8752103389706463e-05
+  >>> epoch 56
+loss = 2.6463276299182326e-05
+  >>> epoch 57
+loss = 2.7921922082896344e-05
+  >>> epoch 58
+loss = 2.324249544471968e-05
+  >>> epoch 59
+loss = 1.834472277550958e-05
+"""

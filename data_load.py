@@ -15,8 +15,8 @@ min_cnt = 0
 # Maximum number of words in a sentence.
 maxlen = 50
 
-source_train = '/home/users/chuanwei.tang/d2l/my_transformer/data/cn.txt'
-target_train = '/home/users/chuanwei.tang/d2l/my_transformer/data/en.txt'
+source_train = './data/cn.txt'
+target_train = './data/en.txt'
 source_test = 'dldemos/Transformer/data/cn.test.txt'
 target_test = 'dldemos/Transformer/data/en.test.txt'
 
@@ -25,7 +25,7 @@ def load_vocab(language):
     assert language in ['cn', 'en']
     vocab = [
         line.split()[0] for line in codecs.open(
-            '/home/users/chuanwei.tang/d2l/my_transformer/data/{}.txt.vocab.tsv'.format(language), 'r',
+            './data/{}.txt.vocab.tsv'.format(language), 'r',
             'utf-8').read().splitlines() if int(line.split()[1]) >= min_cnt
     ]
     word2idx = {word: idx for idx, word in enumerate(vocab)}
@@ -153,7 +153,7 @@ def download(url, dir, name=None):
 
 
 def download_data():
-    data_dir = '/home/users/chuanwei.tang/d2l/my_transformer/data'
+    data_dir = '/mnt/chuanwei.tang/d2l/my_transformer/data'
     urls = [('https://raw.githubusercontent.com/P3n9W31/transformer-pytorch/'
              'master/corpora/cn.txt'),
             ('https://raw.githubusercontent.com/P3n9W31/transformer-pytorch/'
