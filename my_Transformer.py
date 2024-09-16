@@ -7,6 +7,7 @@ from data_load import load_data, load_cn_vocab, load_en_vocab
 from data_my_Transformer import en2cn_dataset
 import os, sys
 import numpy as np
+import csv
 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -262,6 +263,8 @@ class MyTransformer(nn.Module):
         
     def forward(self, srcX, tarX, enc_valid_len, contex_time_step):
         enc_output = self.encoder(srcX, enc_valid_len)
+
+        # 这里的decoder没有传入vlaid_lens是因为decoder block里面生成了，这样不好，需要优化！
         dec_output = self.decoder(tarX, enc_output, enc_valid_len)
         output = self.output_layer(dec_output)
 
@@ -283,61 +286,94 @@ if __name__ == '__main__':
 
     device = 'cuda'
     log_path = './log'
+    model_save_path = './model_save'
     writer = SummaryWriter(log_path)
     cn2idx, idx2cn = load_cn_vocab()    # len = 12946
     en2idx, idx2en = load_en_vocab()    # len = 11370
-    X_train, Y_train,\
-    Source, Target,\
-    cn_valid_lens, en_valid_lens = load_data('train') # X:cn, Y:en | [seq_num, emb_size_after_padding]
-    contex_time_step = [None] * N_LAYERS
-    dataset = en2cn_dataset(X_train, cn_valid_lens, Y_train, en_valid_lens)
-    train_size = int(len(dataset) * TRAIN_SET_PROP)
-    test_size = len(dataset) - train_size
-    train_dataset, test_dataset = data.random_split(dataset, [train_size, test_size])
-    train_data_loader = data.DataLoader(train_dataset, BATCH_SIZE, shuffle=True, drop_last=True)
-    test_data_loader = data.DataLoader(test_dataset, BATCH_SIZE, shuffle=True, drop_last=True)
-    print(">>> Data prepared.")
-
     model = MyTransformer(NUM_HEADS, NUM_HIDDENS, MAX_SEQ_LEN, FFN_H_SIZE, DROPOUT_RATE,
                         N_LAYERS, N_LAYERS, len(en2idx), len(cn2idx), PAD_ID).to(device)
     print(">>> Model prepared.")
-    criterion = nn.CrossEntropyLoss(ignore_index=PAD_ID)
-    print(">>> Criterion prepared.")
-    optimizer = torch.optim.Adam(model.parameters(), LR)
-    loss = 0.0
+    
+    with not any(os.listdir(model_save_path)):
+        X_train, Y_train,\
+        Source, Target,\
+        cn_valid_lens, en_valid_lens = load_data('train') # X:cn, Y:en | [seq_num, emb_size_after_padding]
+        contex_time_step = [None] * N_LAYERS
+        dataset = en2cn_dataset(X_train, cn_valid_lens, Y_train, en_valid_lens)
+        train_data_loader = data.DataLoader(dataset, BATCH_SIZE, shuffle=True, drop_last=True)
+        print(">>> Train Data prepared.")
 
-    model.train()
-    torch.autograd.set_detect_anomaly(True)
-    print(">>> Train start.")
 
-    print_version = False
-    for epoch_i in range(N_EPOCH):
-        print("  >>> epoch {}".format(epoch_i))
-        batch_i = 0
-        for data_batch in train_data_loader:
-            batch_i = batch_i + 1
-            en_batch, en_valid_lens_batch,\
-                cn_batch, cn_valid_lens_batch = data_batch
-            en_batch = en_batch.to(device)
-            en_valid_lens_batch = en_valid_lens_batch.to(device)
-            cn_batch = cn_batch.to(device)
-            cn_valid_lens_batch = cn_valid_lens_batch.to(device)
-            batch_size, seq_len_after_padding = cn_batch.shape
-            optimizer.zero_grad()
-            cn_hat = model(en_batch, cn_batch,
-                           en_valid_lens_batch, contex_time_step)   # [64, 50, 12946]
-            
-            cn_hat_trans = cn_hat.view(batch_size*seq_len_after_padding, -1)  # 
-            cn_batch_trans = cn_batch.view(batch_size*seq_len_after_padding, -1).squeeze()
-            
-            loss = criterion(cn_hat_trans, cn_batch_trans)
+        model.train()
+        optimizer = torch.optim.Adam(model.parameters(), LR)
+        criterion = nn.CrossEntropyLoss(ignore_index=PAD_ID)
+        print(">>> Criterion prepared.")
+        loss = 0.0
+        print(">>> Train start.")
+        for epoch_i in range(N_EPOCH):
+            print("  >>> epoch {}".format(epoch_i))
+            batch_i = 0
+            for data_batch in train_data_loader:
+                batch_i = batch_i + 1
+                en_batch, en_valid_lens_batch,\
+                    cn_batch, cn_valid_lens_batch = data_batch
+                en_batch = en_batch.to(device)
+                en_valid_lens_batch = en_valid_lens_batch.to(device)
+                cn_batch = cn_batch.to(device)
+                cn_valid_lens_batch = cn_valid_lens_batch.to(device)
+                batch_size, seq_len_after_padding = cn_batch.shape
+                optimizer.zero_grad()
+                cn_hat = model(en_batch, cn_batch,
+                            en_valid_lens_batch, contex_time_step)   # [64, 50, 12946]
+                
+                cn_hat_trans = cn_hat.view(batch_size*seq_len_after_padding, -1)  # 
+                cn_batch_trans = cn_batch.view(batch_size*seq_len_after_padding, -1).squeeze()
+                
+                loss = criterion(cn_hat_trans, cn_batch_trans)
 
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-        print(f"loss = {loss}")
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+            print(f"loss = {loss}")
 
-        writer.add_scalar('loss', loss, epoch_i)
+            writer.add_scalar('loss', loss, epoch_i)
+        # Save trained model.
+        torch.save(model.state_dict(), model_save_path)
+
+    with any(os.listdir(model_save_path)):
+        model.load_state_dict(torch.load(model_save_path))
+        X_test, Y_test,\
+        Source, Target,\
+        cn_valid_lens, en_valid_lens = load_data('test') # X:cn, Y:en | [seq_num, emb_size_after_padding]
+        dataset = en2cn_dataset(X_test, cn_valid_lens, Y_test, en_valid_lens)
+        test_data_loader = data.DataLoader(dataset, BATCH_SIZE, shuffle=True, drop_last=True)
+        # Load vocabularies
+        cn_vocab = {}
+        en_vocab = {}
+        vocab_files = ['./data/cn.txt.vocab.txt', './data/en.txt.vocab.txt']
+        for file_path in vocab_files:
+            _, file_name = os.path.split(file_path)
+            with open(file_path, 'r', newline='') as file:
+                tsv_reader = csv.reader(file, delimiter='\t')
+                for row in tsv_reader:
+                    if len(row) >= 2:
+                        key = row[1]
+                        value = row[0]
+                        if (file_name[0:2] == 'cn'):
+                            assert file_name[0:2] == 'cn'
+                            cn_vocab[key] = value
+                        else:
+                            assert file_name[0:2] == 'en'
+                            en_vocab[key] = value
+
+        model.eval()
+        print (">>> Test start.")
+        with torch.no_grad():
+            for test_batch in test_data_loader:
+                en_batch, en_valid_lens_batch,\
+                            cn_batch, cn_valid_lens_batch = test_batch
+
+        
 
 """
   >>> epoch 55

@@ -17,8 +17,8 @@ maxlen = 50
 
 source_train = './data/cn.txt'
 target_train = './data/en.txt'
-source_test = 'dldemos/Transformer/data/cn.test.txt'
-target_test = 'dldemos/Transformer/data/en.test.txt'
+source_test = './data/cn.test.txt'
+target_test = './data/en.test.txt'
 
 
 def load_vocab(language):
