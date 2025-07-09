@@ -43,9 +43,9 @@ class DotProductAttention(nn.Module):
     def __init__(self, dropout):
         super(DotProductAttention, self).__init__()
         self.dropout = nn.Dropout(dropout)
-    def musked_softmax(self, scores, valid_lens):
+    def _masked_softmax(self, scores, valid_lens):
         """
-        score: [Batch_size, Num of quaries, Num of keys]
+        scores: [Batch_size, Num of quaries, Num of keys]
         其中Num of keys这个维度是被查询文本的序列长度l，
         valid_len在这个维度上指定有效长度
         """
@@ -65,14 +65,14 @@ class DotProductAttention(nn.Module):
             else:
                 valid_lens = valid_lens.reshape(-1)
 
-            scores = _seq_mask(scores.reshape(-1, qk_shape[-1]), valid_lens, value=1e-6)
+            scores = _seq_mask(scores.reshape(-1, qk_shape[-1]), valid_lens, value=-1e-6)
             return nn.functional.softmax(scores.reshape(qk_shape), dim=-1)
 
     
     def forward(self, queries, keys, values, valid_lens=None):
         d = queries.shape[2]
         alpha = torch.bmm(queries, keys.transpose(1,2)) / math.sqrt(d)
-        self.attention_weights = self.musked_softmax(alpha, valid_lens)
+        self.attention_weights = self._masked_softmax(alpha, valid_lens)
         return torch.bmm(self.dropout(self.attention_weights), values)
     
 class MultiHeadAttention(nn.Module):
@@ -87,7 +87,8 @@ class MultiHeadAttention(nn.Module):
 
     def reshape_qkv(self, X):
         shape = X.shape
-        X = X.reshape(shape[0], shape[1], self.num_heads, -1)
+        # assert shape[-1] % self.num_heads == 0, "嵌入向量的维度必须被头的数量整除。"
+        X = X.reshape(shape[0], shape[1], self.num_heads, -1)   # [B, N, H, D/H]
 
         # 将X转换为(batch_size, num_heads, q的数目或者k-v的数目——文本长度, p_q or p_k or p_v)
         X = X.permute(0, 2, 1, 3)
@@ -98,12 +99,12 @@ class MultiHeadAttention(nn.Module):
         X = X.permute(0, 2, 1, 3)
         return X.reshape(X.shape[0], X.shape[1], -1)    # (batch_size, q的数目, p_o)
 
-    def forward(self, quaries, keys, values, valid_lens):
+    def forward(self, queries, keys, values, valid_lens):
         """
         输入的qkv的形状是[batch_size, q的数目或者k-v的数目——文本长度, d_q或者d_k或d_v]
         映射后的qkv的维度是p_q, p_k, p_v
         """
-        q = self.reshape_qkv(self.W_q(quaries))   # (batch_size * num_heads, q的数目, p_q)
+        q = self.reshape_qkv(self.W_q(queries))   # (batch_size * num_heads, q的数目, p_q)
         k = self.reshape_qkv(self.W_k(keys))
         v = self.reshape_qkv(self.W_v(values))
 
@@ -131,7 +132,7 @@ class AddNorm(nn.Module):
     def __init__(self, embedding_dim, dropout):
         super(AddNorm, self).__init__()
         self.dropout = nn.Dropout(dropout)
-        self.layer_norm = LayerNorm_man(embedding_dim)
+        self.layer_norm = LayerNorm_man(embedding_dim)  # 这里如果换成nn.LayerNorm损失不下降，这是为什么？
 
     def forward(self, X, Y):
         output = self.layer_norm(self.dropout(Y) + X)
@@ -263,8 +264,6 @@ class MyTransformer(nn.Module):
         
     def forward(self, srcX, tarX, enc_valid_len, contex_time_step):
         enc_output = self.encoder(srcX, enc_valid_len)
-
-        # 这里的decoder没有传入vlaid_lens是因为decoder block里面生成了，这样不好，需要优化！
         dec_output = self.decoder(tarX, enc_output, enc_valid_len)
         output = self.output_layer(dec_output)
 
